@@ -1,12 +1,13 @@
 "use client";
 
-import React, { useState, useEffect, createContext, useContext } from "react";
+import React, { useState, useEffect, useCallback, createContext, useContext } from "react";
 import { AppSidebar } from "@/components/dashboard/AppSidebar";
 import { AppTopbar } from "@/components/dashboard/AppTopbar";
 import { Loader2 } from "lucide-react";
 import { usePathname, useRouter } from "next/navigation";
 import { Toaster } from "react-hot-toast";
 import { useSupabase } from "@/providers/supabase-provider";
+import RoleBasedPageProtection from "@/components/auth/RoleBasedPageProtection";
 // Buat context untuk mengelola status autentikasi global
 interface SessionContextType {
   isStayOnPage: boolean;
@@ -91,16 +92,7 @@ export default function DashboardLayout({
   const authChecked = React.useRef(false);
   const pathname = usePathname();
 
-  // Cek autentikasi saat komponen dimuat
-  useEffect(() => {
-    // Jika autentikasi sudah diperiksa, tidak perlu periksa lagi
-    if (authChecked.current) return;
-
-    // Menggunakan data dari Supabase
-    checkAuth();
-  }, [isLoading, user]);
-
-  const checkAuth = () => {
+  const checkAuth = useCallback(() => {
     try {
       console.log("[DashboardLayout] Memeriksa autentikasi dengan Supabase, loading:", isLoading);
       
@@ -170,7 +162,16 @@ export default function DashboardLayout({
       console.error("[DashboardLayout] Error memeriksa autentikasi:", error);
       setIsAuthenticated(false);
     }
-  };
+  }, [isLoading, user, pathname, router]);
+
+  // Cek autentikasi saat komponen dimuat
+  useEffect(() => {
+    // Jika autentikasi sudah diperiksa, tidak perlu periksa lagi
+    if (authChecked.current) return;
+
+    // Menggunakan data dari Supabase
+    checkAuth();
+  }, [checkAuth]); // Hanya depend pada checkAuth
 
   // Navigasi handling
   useEffect(() => {
@@ -211,7 +212,11 @@ export default function DashboardLayout({
           <main className="flex-1 overflow-y-auto p-6">
             {/* Info Banner jika ada masalah autentikasi */}
             <SessionWarningBanner />
-            {children}
+            
+            {/* Role-based page protection */}
+            <RoleBasedPageProtection>
+              {children}
+            </RoleBasedPageProtection>
           </main>
         </div>
       </div>

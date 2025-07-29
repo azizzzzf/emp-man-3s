@@ -2,24 +2,28 @@ import { PrismaClient } from '@prisma/client';
 
 // Enhanced database connection configuration untuk production-ready performance
 const createPrismaClient = () => {
+  const connectionUrl = process.env.DATABASE_POOLING_URL || process.env.DATABASE_URL;
+  
+  // Add connection pool parameters to URL if not already present
+  const url = new URL(connectionUrl!);
+  if (!url.searchParams.has('pool_timeout')) {
+    url.searchParams.set('pool_timeout', '20'); // Increased from 15 to 20 for more stability
+  }
+  if (!url.searchParams.has('connection_limit')) {
+    url.searchParams.set('connection_limit', '12'); // Increased from 8 to 12 for higher concurrency
+  }
+  if (!url.searchParams.has('connect_timeout')) {
+    url.searchParams.set('connect_timeout', '15'); // Increased from 10 to 15
+  }
+  
   return new PrismaClient({
     log: process.env.NODE_ENV === 'development' ? ['error', 'warn'] : ['error'],
     errorFormat: 'pretty',
     datasources: {
       db: {
-        url: process.env.DATABASE_POOLING_URL || process.env.DATABASE_URL,
+        url: url.toString(),
       },
     },
-    // Enhanced configuration for better performance - commented out for compatibility
-    // __internal: {
-    //   engine: {
-    //     // Connection pool configuration
-    //     pool_timeout: 30, // 30 seconds pool timeout
-    //     connection_limit: 20, // Max 20 connections
-    //     // Query timeout
-    //     query_timeout: 60, // 60 seconds query timeout
-    //   },
-    // },
   });
 };
 
@@ -45,7 +49,7 @@ export const ensureDatabaseConnection = async (maxRetries: number = 3): Promise<
       await Promise.race([
         prisma.$executeRaw`SELECT 1`,
         new Promise((_, reject) => 
-          setTimeout(() => reject(new Error('Connection check timeout')), 10000)
+          setTimeout(() => reject(new Error('Connection check timeout')), 12000) // Increased from 10s to 12s
         )
       ]);
       
@@ -126,13 +130,13 @@ export const getDatabaseStats = async () => {
     const [
       userCount,
       employeeCount,
-      attendanceCount,
-      connectionTest
+      attendanceCount
     ] = await Promise.all([
       prisma.user.count(),
       prisma.employee.count(),
       prisma.attendance.count(),
-      prisma.$executeRaw`SELECT 1 as connection_test`
+      // Test connection
+      prisma.$executeRaw`SELECT 1 as connection_test`.then(() => true).catch(() => false)
     ]);
 
     const queryDuration = Date.now() - startTime;
@@ -180,24 +184,41 @@ export const getConnectionPoolStats = async () => {
 // Safe query wrapper dengan retry mechanism
 export const safeQuery = async <T>(
   queryFn: () => Promise<T>,
-  maxRetries: number = 3
+  maxRetries: number = 2, // Reduced dari 3 ke 2 untuk faster response
+  timeoutMs: number = 12000 // Reduced dari 18000 ke 12000 (12s)
 ): Promise<T> => {
   let lastError: Error | null = null;
   
   for (let attempt = 1; attempt <= maxRetries; attempt++) {
     try {
-      // Ensure connection is healthy
-      if (!(await ensureDatabaseConnection())) {
-        throw new Error('Database connection not available');
+      // Optimized connection check - skip untuk speed jika connection pool sudah ada
+      if (attempt === 1) {
+        // Quick connection check hanya pada attempt pertama
+        const connectionPromise = prisma.$executeRaw`SELECT 1`;
+        const timeoutPromise = new Promise<never>((_, reject) => 
+          setTimeout(() => reject(new Error('Connection check timeout')), 3000) // Quick 3s check
+        );
+        
+        try {
+          await Promise.race([connectionPromise, timeoutPromise]);
+        } catch {
+          console.warn(`⚠️ Connection check failed on attempt ${attempt}, proceeding with query...`);
+          // Don't fail here, proceed with query yang mungkin masih bisa sukses
+        }
       }
       
-      // Execute query with timeout
+      // Execute query with timeout - reduced timeout untuk faster failure detection
       const result = await Promise.race([
         queryFn(),
         new Promise<never>((_, reject) => 
-          setTimeout(() => reject(new Error('Query timeout')), 30000)
+          setTimeout(() => reject(new Error('Query timeout')), timeoutMs)
         )
       ]);
+      
+      // Success - log hanya jika ada retry sebelumnya
+      if (attempt > 1) {
+        console.log(`✅ Query succeeded on attempt ${attempt}`);
+      }
       
       return result;
     } catch (error) {
@@ -207,13 +228,14 @@ export const safeQuery = async <T>(
       const isRetryable = isRetryableError(error as Error);
       
       if (!isRetryable || attempt >= maxRetries) {
+        console.error(`❌ Query failed after ${attempt} attempts:`, lastError.message);
         throw error;
       }
       
-      console.warn(`⚠️ Query attempt ${attempt}/${maxRetries} failed, retrying:`, error);
+      console.warn(`⚠️ Query attempt ${attempt}/${maxRetries} failed, retrying:`, lastError.message);
       
-      // Progressive backoff
-      const backoffMs = Math.min(1000 * Math.pow(2, attempt - 1), 5000);
+      // Reduced progressive backoff untuk faster retries
+      const backoffMs = Math.min(500 * Math.pow(1.5, attempt - 1), 2000); // Faster backoff
       await new Promise(resolve => setTimeout(resolve, backoffMs));
     }
   }
@@ -253,7 +275,7 @@ if (process.env.NODE_ENV === 'production') {
     } else {
       console.error('❌ Database health check failed');
     }
-  }).catch((error) => {
+  }).catch((error: Error) => {
     console.error('❌ Database connection failed:', error);
   });
 }
